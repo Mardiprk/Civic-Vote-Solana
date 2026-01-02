@@ -1,4 +1,6 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::system_instruction::{transfer};
+use anchor_lang::solana_program::program::invoke;
 
 declare_id!("8YfCp7xf5XnFh6aAXdMskLs1cya4puZtFWcaUSzsbPnY");
 
@@ -31,6 +33,7 @@ pub mod civic_vote {
         let party = &mut ctx.accounts.party;
         let clock = Clock::get()?;
 
+        //prevent initilization after voting starts
         require!(
             clock.unix_timestamp < election.start_ts,
             VoteError::ElectionAlreadyStarted
@@ -48,7 +51,70 @@ pub mod civic_vote {
     }
 
     pub fn init_state_votes(ctx: Context<InitStateVotes>, state_id: u8) -> Result<()>{
+        let election = &ctx.accounts.election;
+        let state_votes = &mut ctx.accounts.state_votes;
+        let clock = Clock::get()?;
+
+        // valid state ID
+        require!(state_id <= 35, VoteError::InvalidStateId);
+
+        //prevent initilization after voting starts
+        require!(
+            clock.unix_timestamp < election.start_ts,
+            VoteError::ElectionAlreadyStarted
+        );
+
+        state_votes.election = election.key();
+        state_votes.state_id = state_id;
+        state_votes.total_votes = 0;
+        state_votes.bump = ctx.bumps.state_votes;
+
         
+        for i in 0..MAX_PARTIES{
+            state_votes.votes[i] = 0;
+        }
+
+        Ok(())
+    }
+
+    pub fn cast_vote(ctx: Context<CasteVote>, state_id: u8, party_id: u8) -> Result<()>{
+        let election = &mut ctx.accounts.election;
+        let state_votes = &mut ctx.accounts.state_votes;
+        let vote_record = &mut ctx.accounts.voter_record;
+        let voter = &ctx.accounts.voter;
+        let clock = Clock::get()?;
+
+        // time window checks
+        require!(clock.unix_timestamp <= election.start_ts, VoteError::VotingNotStarted);
+        require!(clock.unix_timestamp <= election.end_ts, VoteError::VotingEnded);
+
+        require!(state_votes.state_id == state_id, VoteError::InvalidStateId);
+        require!((party_id as usize ) < MAX_PARTIES, VoteError::InvalidPartyId);
+
+        // transfer vote fee
+        let ix = transfer(&voter.key(), &election.authority, election.vote_fee_lamports);
+        
+        invoke(&ix, &[
+            voter.to_account_info(),
+            ctx.accounts.system_program.to_account_info()   
+        ])?;
+
+        state_votes.votes[party_id as usize] = state_votes.votes[party_id as usize]
+            .checked_add(1)
+            .ok_or(VoteError::VoteOverflow)?;
+        state_votes.total_votes = state_votes.total_votes
+            .checked_add(1)
+            .ok_or(VoteError::VoteOverflow)?;
+        election.total_votes = election.total_votes
+            .checked_add(1)
+            .ok_or(VoteError::VoteOverflow)?;
+
+        vote_record.election = election.key();
+        vote_record.state_id = state_id;
+        vote_record.voter = voter.key();
+        vote_record.voted_at = clock.unix_timestamp;
+        vote_record.bump = ctx.bumps.voter_record;
+
         Ok(())
     }
 }
@@ -128,6 +194,44 @@ pub struct InitStateVotes<'info>{
     pub system_program: Program<'info, System>
 }
 
+#[derive(Accounts)]
+#[instruction(state_id: u8)]
+pub struct CasteVote<'info>{
+    #[account(
+        mut,
+        seeds = [b"election", election.key().as_ref()],
+        bump = election.bump,
+    )]
+    pub election: Account<'info, ElectionConfig>,
+
+    #[account(
+        mut,
+        seeds = [
+            b"state_votes",
+            election.key().as_ref(),
+            &[state_id]
+        ],
+        bump = state_votes.bump
+    )]
+    pub state_votes: Account<'info, StateVotes>,
+
+    #[account(
+        init,
+        payer = voter,
+        space = 8 + VoteRecord::INIT_SPACE,
+        seeds = [ 
+            b"vote_record", election.key().as_ref(), &[state_id], voter.key().as_ref()
+        ],
+        bump
+    )]
+    pub voter_record: Account<'info, VoteRecord>,
+
+    #[account(mut)]
+    pub voter: Signer<'info>,
+
+    pub system_program: Program<'info, System>
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct ElectionConfig{
@@ -159,6 +263,16 @@ pub struct StateVotes{
     pub bump: u8 // PDA Bump
 }
 
+#[account]
+#[derive(InitSpace)]
+pub struct VoteRecord{
+    pub election: Pubkey,
+    pub state_id: u8, // 0..35
+    pub voter: Pubkey,
+    pub voted_at: i64,
+    pub bump: u8
+}
+
 #[error_code]
 pub enum VoteError {
     #[msg("End time must be after start time")]
@@ -168,5 +282,15 @@ pub enum VoteError {
     #[msg("Election has already started")]
     ElectionAlreadyStarted,
     #[msg("Invalid party name")]
-    InvalidPartyName
+    InvalidPartyName,
+    #[msg("Invalid state ID")]
+    InvalidStateId,
+    #[msg("Voting has not started")]
+    VotingNotStarted,
+    #[msg("Voting has ended")]
+    VotingEnded,
+    #[msg("Invalid party ID")]
+    InvalidPartyId,
+    #[msg("Vote counter overflow")]
+    VoteOverflow,
 }
