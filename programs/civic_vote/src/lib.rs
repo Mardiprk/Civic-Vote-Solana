@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::system_instruction::{transfer};
 use anchor_lang::solana_program::program::invoke;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 declare_id!("8YfCp7xf5XnFh6aAXdMskLs1cya4puZtFWcaUSzsbPnY");
 
@@ -17,6 +18,27 @@ pub mod civic_vote {
         require!(start_ts >= clock.unix_timestamp, VoteError::StartInPast);
 
         let election = &mut ctx.accounts.election;
+
+        election.state_schedule = vec![
+            0, 1,
+            2, 3,
+            4, 5,
+            6, 7,
+            8, 9,
+            10, 11,
+            12, 13,
+            14, 15,
+            16, 17,
+            18, 19,
+            20, 21,
+            22, 23,
+            24, 25,
+            26, 27,
+            28, 29,
+            30, 31,
+            32, 33,
+            34, 35,
+        ];
 
         election.authority = ctx.accounts.authority.key();
         election.start_ts = start_ts;
@@ -91,6 +113,26 @@ pub mod civic_vote {
         require!(state_votes.state_id == state_id, VoteError::InvalidStateId);
         require!((party_id as usize ) < MAX_PARTIES, VoteError::InvalidPartyId);
 
+        let diff = clock.unix_timestamp.checked_sub(election.start_ts);
+        let elapsed_days = match diff {
+            Some(d) if d >= 0 => d / 86_400, // Safe non-negative division.
+            _ => 0, // Or handle error (e.g., log, return Err, etc.).
+        };
+
+        let day_index = elapsed_days as usize;
+        let schedule_index = day_index.checked_mul(2).ok_or(VoteError::MathOverflow)?;
+        let next_schedule_index = schedule_index.checked_add(1).ok_or(VoteError::MathOverflow)?;
+
+        require!(
+            next_schedule_index < election.state_schedule.len(),
+            VoteError::VotingEnded
+        );
+
+        let allowed_state_1 = election.state_schedule[schedule_index];
+        let allowed_state_2 = election.state_schedule[next_schedule_index];
+
+        require!(state_id == allowed_state_1 || state_id == allowed_state_2, VoteError::StateNotScheduledToday);
+        
         // transfer vote fee
         let ix = transfer(&voter.key(), &election.authority, election.vote_fee_lamports);
         
@@ -240,6 +282,8 @@ pub struct ElectionConfig{
     pub end_ts: i64,    // hard stop
     pub vote_fee_lamports: u64, // voting fees
     pub total_votes: u64,
+    #[max_len(40)]
+    pub state_schedule: Vec<u8>,
     pub bump: u8 // PDA validation
 }
 
@@ -293,4 +337,8 @@ pub enum VoteError {
     InvalidPartyId,
     #[msg("Vote counter overflow")]
     VoteOverflow,
+    #[msg("State is not scheduled to vote today")]
+    StateNotScheduledToday,
+    #[msg("Math Overflow")]
+    MathOverflow,
 }
